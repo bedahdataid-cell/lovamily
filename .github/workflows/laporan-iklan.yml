@@ -1,0 +1,59 @@
+name: Laporan Iklan Lovamily
+
+# Berjalan di cloud GitHub — TIDAK butuh PC menyala.
+# Jadwal cron GitHub dalam UTC. WIB = UTC+7.
+#   Harian  07:00 WIB  -> 00:00 UTC
+#   Mingguan 07:30 WIB Senin -> 00:30 UTC Senin
+# Catatan: cron GitHub bisa telat 5-15 menit saat beban tinggi (normal).
+
+on:
+  schedule:
+    - cron: "0 0 * * *"      # harian 07:00 WIB
+    - cron: "30 0 * * 1"     # mingguan Senin 07:30 WIB
+  workflow_dispatch:          # tombol "Run workflow" manual di tab Actions
+    inputs:
+      mode:
+        description: "Mode laporan"
+        required: true
+        default: "harian"
+        type: choice
+        options: [harian, mingguan]
+
+concurrency:
+  group: laporan-iklan
+  cancel-in-progress: false
+
+jobs:
+  laporan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install --quiet requests
+
+      - name: Tentukan mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "30 0 * * 1" ]; then
+            echo "value=mingguan" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=harian" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Kirim laporan
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python tools/laporan-iklan/laporan_harian_iklan.py "${{ steps.mode.outputs.value }}"
