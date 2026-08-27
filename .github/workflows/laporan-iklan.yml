@@ -5,6 +5,9 @@ name: Laporan Iklan Lovamily
 #   Harian  07:00 WIB  -> 00:00 UTC
 #   Mingguan 07:30 WIB Senin -> 00:30 UTC Senin
 # Catatan: cron GitHub bisa telat 5-15 menit saat beban tinggi (normal).
+#
+# repository_dispatch (event_type: laporan_iklan) dipicu Cloudflare Worker
+# saat ada perintah "/laporan [harian|mingguan]" di grup Telegram.
 
 on:
   schedule:
@@ -18,6 +21,8 @@ on:
         default: "harian"
         type: choice
         options: [harian, mingguan]
+  repository_dispatch:
+    types: [laporan_iklan]
 
 concurrency:
   group: laporan-iklan
@@ -42,13 +47,22 @@ jobs:
       - name: Tentukan mode
         id: mode
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "30 0 * * 1" ]; then
-            echo "value=mingguan" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=harian" >> "$GITHUB_OUTPUT"
-          fi
+          case "${{ github.event_name }}" in
+            workflow_dispatch)
+              echo "value=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT" ;;
+            repository_dispatch)
+              m="${{ github.event.client_payload.mode }}"
+              [ "$m" = "mingguan" ] || m="harian"
+              echo "value=$m" >> "$GITHUB_OUTPUT" ;;
+            schedule)
+              if [ "${{ github.event.schedule }}" = "30 0 * * 1" ]; then
+                echo "value=mingguan" >> "$GITHUB_OUTPUT"
+              else
+                echo "value=harian" >> "$GITHUB_OUTPUT"
+              fi ;;
+            *)
+              echo "value=harian" >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Kirim laporan
         env:

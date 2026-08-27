@@ -1,0 +1,18 @@
+# Deploy dengan Wrangler (opsional — bisa juga paste worker.js lewat dashboard).
+#   npm i -g wrangler
+#   wrangler login
+#   wrangler deploy
+#
+# Secrets JANGAN ditaruh di file ini. Set lewat:
+#   wrangler secret put TELEGRAM_BOT_TOKEN
+#   wrangler secret put TELEGRAM_SECRET
+#   wrangler secret put GITHUB_PAT
+# atau dashboard: Worker -> Settings -> Variables and Secrets.
+
+name = "lovamily-laporan-relay"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+GITHUB_REPO = "bedahdataid-cell/lovamily"
+ALLOWED_CHAT_ID = "-5432346051"
