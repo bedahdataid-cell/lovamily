@@ -250,16 +250,48 @@ def cost_per_result(row: dict, result_type: str):
     return None
 
 
-def verdict(spend: float, results: int, cpr) -> str:
+def verdict(spend: float, results: int, cpr) -> tuple[str, str]:
+    """Kembalikan (emoji_label, penjelasan_singkat)."""
     if results == 0 and spend >= KILL_SPEND:
-        return "\U0001F534 KILL"
+        return "\U0001F534 STOP", f"habis {rupiah(spend)} tanpa hasil — sebaiknya dimatikan"
     if results >= 3 and cpr is not None and cpr <= OK_CPR_MAX:
-        return "\U0001F7E2 OK"
+        return "\U0001F7E2 BAGUS", f"{results} hasil, {rupiah(cpr)}/hasil — kandidat dinaikkan"
     if 1 <= results <= 2 and cpr is not None and cpr <= WATCH_CPR_MAX:
-        return "\U0001F7E1 WATCH"
+        return "\U0001F7E1 PANTAU", f"{results} hasil, {rupiah(cpr)}/hasil — tunggu 7 hari"
     if results == 0:
-        return "⚪ belum ada hasil"
-    return "\U0001F7E1 pantau"
+        return "⚪ BARU", "belum ada hasil, masih terlalu dini"
+    return "\U0001F7E1 PANTAU", f"{results} hasil — biaya/hasil masih di atas target"
+
+
+def ctr_note(ctr: float) -> str:
+    if ctr >= 8:
+        return " ⭐"
+    return ""
+
+
+def shorten_ad_name(raw: str) -> str:
+    """'kupikir foto sungkeman ini : 1811... - Aug 18, 2026' -> 'kupikir foto sungkeman ini'."""
+    name = raw.split(" : ")[0].split(" - ")[0].strip()
+    name = name.rstrip(" :–-").strip()
+    if len(name) > 42:
+        name = name[:41].rstrip() + "…"
+    return name or "(tanpa nama)"
+
+
+# Pengelompokan ad berdasar kata kunci di nama — supaya pola angle terlihat.
+ANGLE_GROUPS = [
+    ("Pernikahan / Sungkeman", ("nikah", "sungkem", "altar", "altas", "pengantin", "ayah di momen")),
+    ("Wisuda", ("wisuda", "wisudawa")),
+    ("Foto lama disatukan", ("foto lama", "disatukan", "di satukan", "satu foto")),
+]
+
+
+def angle_of(name: str) -> str:
+    low = name.lower()
+    for label, keys in ANGLE_GROUPS:
+        if any(k in low for k in keys):
+            return label
+    return "Lainnya"
 
 
 def arrow(now_v, prev_v) -> str:
@@ -279,70 +311,71 @@ def arrow(now_v, prev_v) -> str:
 # Formatting
 # ---------------------------------------------------------------------------
 
+OBJ_ID = {"OUTCOME_SALES": "Penjualan", "OUTCOME_ENGAGEMENT": "Chat WA",
+          "OUTCOME_LEADS": "Leads", "OUTCOME_TRAFFIC": "Traffic",
+          "OUTCOME_AWARENESS": "Awareness"}
+
+
 def account_header(mode: str) -> list[str]:
     acct = fetch_account_status()
     code = acct.get("account_status")
-    status = ACCOUNT_STATUS_LABEL.get(code, str(code))
     bal = acct.get("balance")
     bal_txt = rupiah(int(bal) / 100) if bal not in (None, "") else "-"
-    title = "Laporan Harian" if mode == "harian" else "🗓️ Analisa Mingguan"
+    label = {"harian": "kemarin", "mingguan": "7 hari terakhir"}.get(mode, mode)
     head = [
-        f"\U0001F4CA <b>{title} Iklan Lovamily</b> — {now_wib():%d %b %Y, %H:%M} WIB",
-        f"Akun: {esc(acct.get('name', '-'))} · status <b>{esc(status)}</b> · saldo {bal_txt}",
+        f"\U0001F4CA <b>Laporan Iklan Lovamily</b>",
+        f"{now_wib():%A, %d %b %Y · %H:%M} WIB — data {label}",
     ]
     if code == 9:
-        head.append("⚠️ <b>IN_GRACE_PERIOD</b> — tagihan tertunggak, segera cek billing.")
-    head.append("─" * 20)
+        head.append("")
+        head.append(f"🔴 <b>Tagihan tertunggak</b> (saldo {bal_txt}). "
+                    "Iklan bisa berhenti — segera bayar di Ads Manager.")
+    head.append("━" * 18)
     return head
 
 
-def fmt_campaign_block(rows_by_win: dict, wins: list[tuple[str, str]],
-                       name_hint: str = "", obj_hint: str = "") -> str:
-    """rows_by_win: {win_key: campaign_row}. wins: [(win_key, label), ...]"""
-    ref = next((rows_by_win[k] for k, _ in wins if rows_by_win.get(k)), {})
-    name = ref.get("campaign_name") or name_hint or "(campaign)"
-    obj = ref.get("objective") or obj_hint or "-"
-    lines = [f"\U0001F4E6 <b>{esc(name)}</b>", f"   <i>{esc(obj)}</i>"]
-    for key, label in wins:
-        row = rows_by_win.get(key)
-        if not row:
-            lines.append(f"   {label}: -")
-            continue
-        spend = float(row.get("spend", 0) or 0)
-        res, rtype = sum_results(row)
-        cpr = cost_per_result(row, rtype)
-        ctr = float(row.get("ctr", 0) or 0)
-        piece = f"   {label}: {rupiah(spend)} · {res} hasil · CTR {ctr:.2f}% · CPC {rupiah(row.get('cpc'))}"
-        if cpr is not None:
-            piece += f" · {rupiah(cpr)}/hasil"
-        lines.append(piece)
-    # verdict selalu dari window kumulatif
-    cum = rows_by_win.get("cum")
-    if cum:
-        s = float(cum.get("spend", 0) or 0)
-        r, rt = sum_results(cum)
-        lines.append(f"   → {verdict(s, r, cost_per_result(cum, rt))}")
-    return "\n".join(lines)
+def campaign_summary_line(camp_recent: dict, camp_cum: dict) -> list[str]:
+    """Ringkasan 1 blok pendek per campaign: total + verdict + kalimat."""
+    ref = camp_cum or camp_recent
+    name = ref.get("campaign_name", "(campaign)")
+    obj = OBJ_ID.get(ref.get("objective", ""), ref.get("objective", "-"))
+
+    s_now = float((camp_recent or {}).get("spend", 0) or 0)
+    r_now, _ = sum_results(camp_recent) if camp_recent else (0, "-")
+    s_cum = float((camp_cum or {}).get("spend", 0) or 0)
+    r_cum, rt_cum = sum_results(camp_cum) if camp_cum else (0, "-")
+    cpr_cum = cost_per_result(camp_cum, rt_cum) if camp_cum else None
+    emo, why = verdict(s_cum, r_cum, cpr_cum)
+
+    out = [
+        f"\U0001F4E6 <b>{esc(name)}</b> — tujuan: {esc(obj)}",
+        f"   {emo} · {esc(why)}",
+        f"   Kemarin: {rupiah(s_now)} → {r_now} hasil    |    "
+        f"Total: {rupiah(s_cum)} → {r_cum} hasil"
+        + (f" ({rupiah(cpr_cum)}/hasil)" if cpr_cum is not None else ""),
+    ]
+    return out
 
 
-def fmt_ad_line(rows_by_win: dict, wins: list[tuple[str, str]]) -> str:
-    ref = next((rows_by_win[k] for k, _ in wins if rows_by_win.get(k)), {})
-    name = ref.get("ad_name", "(ad)")
-    parts = []
-    for key, label in wins:
-        row = rows_by_win.get(key)
-        if not row:
-            continue
-        spend = float(row.get("spend", 0) or 0)
-        res, rt = sum_results(row)
-        cpr = cost_per_result(row, rt)
-        seg = f"{label} {rupiah(spend)}/{res}h"
-        if cpr is not None:
-            seg += f" @{rupiah(cpr)}"
-        parts.append(seg)
-    cum = rows_by_win.get("cum")
-    ctr = float((cum or ref).get("ctr", 0) or 0)
-    return f"   • {esc(name)}\n     " + " · ".join(parts) + f" · CTR {ctr:.1f}%"
+def fmt_ad_compact(ad_recent: dict, ad_cum: dict) -> str:
+    """Satu ad, 2 baris: nama + verdict-emoji, lalu angka ringkas."""
+    ref = ad_cum or ad_recent
+    name = shorten_ad_name(ref.get("ad_name", "(ad)"))
+    s_now = float((ad_recent or {}).get("spend", 0) or 0)
+    r_now, _ = sum_results(ad_recent) if ad_recent else (0, "-")
+    s_cum = float((ad_cum or {}).get("spend", 0) or 0)
+    r_cum, rt = sum_results(ad_cum) if ad_cum else (0, "-")
+    cpr = cost_per_result(ad_cum, rt) if ad_cum else None
+    ctr = float((ad_cum or ref).get("ctr", 0) or 0)
+    emo, _why = verdict(s_cum, r_cum, cpr)
+    dot = emo.split()[0]  # cuma bulatan warnanya
+
+    tail = f" · {rupiah(cpr)}/hasil" if cpr is not None else ""
+    return (
+        f"   {dot} {esc(name)}{ctr_note(ctr)}\n"
+        f"      total {rupiah(s_cum)} · {r_cum} hasil · CTR {ctr:.1f}%{tail}"
+        f"  (kemarin {rupiah(s_now)}/{r_now}h)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -382,11 +415,10 @@ def build_mingguan() -> str:
     }
     prev_camp = {r["campaign_id"]: r for r in fetch_insights("campaign", time_range=tr_prev)}
 
-    body = [account_header("mingguan")[0]]  # placeholder replaced below
     msg = assemble("mingguan", wins, camp, ads)
 
-    # tambahkan blok TREN + REKOMENDASI di akhir
-    trend_lines = ["", "─" * 20, "<b>Arah tren (7d ini vs 7d lalu)</b>"]
+    # --- blok TREN (7d ini vs 7d lalu) ---
+    trend_lines = ["", "━" * 18, "<b>Tren mingguan</b> (7 hari ini vs 7 hari sebelumnya)"]
     for cid, row in sorted(
         camp["recent"].items(),
         key=lambda kv: float(kv[1].get("spend", 0) or 0),
@@ -395,27 +427,28 @@ def build_mingguan() -> str:
         prev = prev_camp.get(cid, {})
         r_now, rt = sum_results(row)
         r_prev, _ = sum_results(prev)
-        cpr_now = cost_per_result(row, rt)
-        cpr_prev = cost_per_result(prev, rt)
+        s_now = float(row.get("spend", 0) or 0)
+        s_prev = float(prev.get("spend", 0) or 0)
+        nm = esc(row.get("campaign_name", "(campaign)"))
         trend_lines.append(
-            f"• {esc(row.get('campaign_name', '(campaign)'))}: "
-            f"spend{arrow(row.get('spend'), prev.get('spend'))} · "
-            f"hasil {r_prev}→{r_now}{arrow(r_now, r_prev)} · "
-            f"biaya/hasil{arrow(cpr_now, cpr_prev)}"
+            f"• {nm}\n"
+            f"   belanja {rupiah(s_prev)} → {rupiah(s_now)}{arrow(s_now, s_prev)}  ·  "
+            f"hasil {r_prev} → {r_now}{arrow(r_now, r_prev)}"
         )
 
-    rec_lines = ["", "<b>Rekomendasi</b>"]
+    # --- REKOMENDASI ---
+    rec_lines = ["", "<b>Rekomendasi minggu ini</b>"]
     recs = build_recs(camp["cum"], ads["cum"], camp["recent"], prev_camp)
-    rec_lines += [f"{i}. {line}" for i, line in enumerate(recs, 1)] or ["— tidak ada aksi mendesak."]
+    rec_lines += [f"{i}. {line}" for i, line in enumerate(recs, 1)]
     rec_lines.append("")
     rec_lines.append(
-        "⚠️ Min. 7 hari sebelum menyimpulkan. Jangan mass-kill kalau semua turun "
-        "bareng — cek WA telat balas / stok / harga / LP dulu. Aksi tulis "
-        "(pause, ubah budget) tetap keputusan Owner."
+        "⚠️ Butuh min. 7 hari data sebelum menyimpulkan. Kalau semua turun bersamaan, "
+        "cek dulu: admin telat balas WA / stok / harga / landing page — bukan langsung "
+        "matikan iklan. Keputusan pause / ubah budget tetap di tangan Owner."
     )
     rec_lines.append(
-        "ℹ️ ROAS penuh direkonstruksi manual dari closing WA "
-        "(tanggal · nama ads · CEP · kualitas A/B/C · nilai order) ÷ spend."
+        "ℹ️ Nilai penjualan sebenarnya (ROAS) dihitung terpisah dari catatan closing "
+        "WhatsApp Sales Closer: tanggal · nama iklan · nilai order ÷ belanja iklan."
     )
     return msg + "\n" + "\n".join(trend_lines + rec_lines)
 
@@ -426,80 +459,115 @@ def build_recs(camp_cum, ads_cum, camp_7d, prev_camp) -> list[str]:
         spend = float(row.get("spend", 0) or 0)
         res, rt = sum_results(row)
         cpr = cost_per_result(row, rt)
-        name = row.get("ad_name", "(ad)")
+        name = shorten_ad_name(row.get("ad_name", "(ad)"))
         if res == 0 and spend >= KILL_SPEND:
-            out.append(f"KILL ad «{name}» — spend {rupiah(spend)} tanpa hasil (ambang {rupiah(KILL_SPEND)}).")
+            out.append(f"🔴 Matikan «{esc(name)}» — sudah habis {rupiah(spend)} tanpa satu pun hasil.")
         elif res >= 3 and cpr is not None and cpr <= OK_CPR_MAX:
-            out.append(f"Kandidat GRADUATE ad «{name}» — {res} hasil @ {rupiah(cpr)}/hasil. "
-                       f"Cek closing terlacak, bertahan 7–14 hari sebelum copy ke Winning.")
-    # sinyal fatigue: frequency tinggi di 7d
+            out.append(f"🟢 Naikkan «{esc(name)}» — {res} hasil @ {rupiah(cpr)}/hasil. "
+                       f"Pastikan ada closing WA terlacak & bertahan 7–14 hari dulu.")
     for cid, row in camp_7d.items():
         try:
             freq = float(row.get("frequency", 0) or 0)
         except (TypeError, ValueError):
             freq = 0
         if freq >= 3.0:
-            out.append(f"Frequency {freq:.1f} di «{esc(row.get('campaign_name','(campaign)'))}» "
-                       f"(7d) — indikasi creative fatigue, siapkan kreatif baru.")
+            out.append(f"🟠 Frekuensi tayang {freq:.1f}× di «{esc(row.get('campaign_name', '(campaign)'))}» "
+                       f"— audiens mulai bosan, siapkan kreatif baru.")
     if not out:
-        out.append("Belum ada kreatif yang menembus ambang KILL/GRADUATE. Lanjutkan "
-                   "pengamatan, pastikan ragam angle/format/hook tetap terjaga.")
+        out.append("Belum ada iklan yang perlu dimatikan atau dinaikkan. Lanjutkan "
+                   "pengamatan; jaga ragam angle / format / hook tetap beragam.")
+    return out
+
+
+def _all_ids(d: dict) -> set:
+    out = set()
+    for w in d.values():
+        out |= set(w)
     return out
 
 
 def assemble(mode: str, wins, camp: dict, ads: dict) -> str:
     head = account_header(mode)
-    body: list[str] = []
-    all_cids = set()
-    for w in camp.values():
-        all_cids |= set(w)
-    order = sorted(
-        all_cids,
+
+    cids = sorted(
+        _all_ids(camp),
         key=lambda cid: float((camp["cum"].get(cid, {}) or {}).get("spend", 0) or 0),
         reverse=True,
     )
-    for cid in order:
-        rows_by_win = {k: camp[k].get(cid) for k in camp}
-        # fallback nama/objective dari baris ad mana pun di campaign ini
-        hint = next(
-            (
-                r
-                for w in ads.values()
-                for r in w.values()
-                if (r or {}).get("campaign_id") == cid
-            ),
-            {},
-        )
-        body.append(
-            fmt_campaign_block(
-                rows_by_win, wins,
-                name_hint=hint.get("campaign_name", ""),
-                obj_hint=hint.get("objective", ""),
+    aids = _all_ids(ads)
+
+    # --- kumpulkan verdict per-ad untuk bagian "perlu perhatian" ---
+    perhatian_stop, perhatian_bagus = [], []
+    for aid in aids:
+        ac = ads["cum"].get(aid, {})
+        s = float(ac.get("spend", 0) or 0)
+        r, rt = sum_results(ac)
+        cpr = cost_per_result(ac, rt)
+        nm = shorten_ad_name(ac.get("ad_name", "(ad)"))
+        if r == 0 and s >= KILL_SPEND:
+            perhatian_stop.append(f"   🔴 {esc(nm)} — habis {rupiah(s)}, 0 hasil. Pertimbangkan matikan.")
+        elif r >= 3 and cpr is not None and cpr <= OK_CPR_MAX:
+            perhatian_bagus.append(
+                f"   🟢 {esc(nm)} — {r} hasil @ {rupiah(cpr)}/hasil. Kandidat dinaikkan."
             )
-        )
-        ad_ids = {
-            aid
-            for w in ads.values()
-            for aid, r in w.items()
-            if (r or {}).get("campaign_id") == cid
-        }
-        ad_ids = sorted(
-            ad_ids,
-            key=lambda aid: float((ads["cum"].get(aid, {}) or {}).get("spend", 0) or 0),
-            reverse=True,
-        )
-        for aid in ad_ids:
-            body.append(fmt_ad_line({k: ads[k].get(aid) for k in ads}, wins))
-        body.append("")
+
+    # --- ringkasan total akun ---
+    tot_spend_cum = sum(float((camp["cum"].get(c, {}) or {}).get("spend", 0) or 0) for c in cids)
+    tot_res_cum = sum(sum_results(camp["cum"].get(c, {}))[0] for c in cids)
+    tot_spend_rec = sum(float((camp["recent"].get(c, {}) or {}).get("spend", 0) or 0) for c in cids)
+    tot_res_rec = sum(sum_results(camp["recent"].get(c, {}))[0] for c in cids)
+    ringkas = [
+        f"\U0001F4B0 <b>Total</b>: kemarin {rupiah(tot_spend_rec)} → {tot_res_rec} hasil"
+        f"  ·  keseluruhan {rupiah(tot_spend_cum)} → {tot_res_cum} hasil",
+    ]
+
+    perlu = []
+    if perhatian_stop or perhatian_bagus:
+        perlu.append("")
+        perlu.append("\U0001F514 <b>Perlu perhatian</b>")
+        perlu += perhatian_stop + perhatian_bagus
+    else:
+        perlu.append("")
+        perlu.append("\U0001F7E2 Tidak ada yang mendesak — semua kreatif masih dalam masa uji.")
+
+    # --- detail per campaign, ad dikelompokkan per angle ---
+    detail = ["", "━" * 18, "<b>Rincian per iklan</b>"]
+    for cid in cids:
+        detail.append("")
+        detail += campaign_summary_line(camp["recent"].get(cid, {}), camp["cum"].get(cid, {}))
+
+        camp_aids = [
+            aid for aid in aids
+            if (ads["cum"].get(aid, ads["recent"].get(aid, {})) or {}).get("campaign_id") == cid
+        ]
+        # kelompokkan per angle, urut spend desc di dalam grup
+        groups: dict[str, list] = {}
+        for aid in camp_aids:
+            nm = (ads["cum"].get(aid, ads["recent"].get(aid, {})) or {}).get("ad_name", "")
+            groups.setdefault(angle_of(shorten_ad_name(nm)), []).append(aid)
+
+        # urutkan grup: yang total spend-nya besar dulu
+        def gspend(g):
+            return sum(float((ads["cum"].get(a, {}) or {}).get("spend", 0) or 0) for a in g)
+
+        for gname, gids in sorted(groups.items(), key=lambda kv: gspend(kv[1]), reverse=True):
+            detail.append(f"   <i>— {esc(gname)} —</i>")
+            for aid in sorted(
+                gids,
+                key=lambda a: float((ads["cum"].get(a, {}) or {}).get("spend", 0) or 0),
+                reverse=True,
+            ):
+                detail.append(fmt_ad_compact(ads["recent"].get(aid), ads["cum"].get(aid)))
 
     foot = [
-        "─" * 20,
-        f"Ambang playbook: KILL bila kumulatif ≥ {rupiah(KILL_SPEND)} tanpa hasil · "
-        f"WATCH bila 1–2 hasil ≤ {rupiah(WATCH_CPR_MAX)}/hasil · "
-        f"OK bila ≥3 hasil ≤ {rupiah(OK_CPR_MAX)}/hasil.",
-        "ℹ️ 'hasil' = chat WA / add-to-cart / purchase sesuai objektif.",
+        "",
+        "━" * 18,
+        "<b>Arti tanda</b>: 🟢 bagus (siap dinaikkan) · 🟡 pantau (tunggu 7 hari) · "
+        "🔴 stop (boros tanpa hasil) · ⚪ baru · ⭐ CTR tinggi (&gt;8%).",
+        "‘hasil’ = chat WA / add-to-cart / pembelian, sesuai tujuan campaign. "
+        "Angka pembelian penuh (ROAS) tetap dihitung manual dari closing WhatsApp.",
     ]
-    return "\n".join(head + body + foot)
+    return "\n".join(head + ringkas + perlu + detail + foot)
 
 
 # ---------------------------------------------------------------------------
