@@ -158,13 +158,43 @@ def esc(s) -> str:
 # Meta Graph API
 # ---------------------------------------------------------------------------
 
-def graph_get(path: str, params: dict) -> dict:
-    resp = requests.get(
-        f"{GRAPH}/{path}", params={**params, "access_token": ACCESS_TOKEN}, timeout=60
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Graph {path} ({resp.status_code}): {resp.text[:400]}")
-    return resp.json()
+class RateLimited(RuntimeError):
+    pass
+
+
+def graph_get(path: str, params: dict, _retries: int = 3) -> dict:
+    """GET Graph API dengan retry backoff untuk rate limit transient Meta."""
+    last = ""
+    for attempt in range(_retries + 1):
+        resp = requests.get(
+            f"{GRAPH}/{path}",
+            params={**params, "access_token": ACCESS_TOKEN},
+            timeout=60,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        last = resp.text[:500]
+        # kode 4 / subcode 1504022 / 613 = app/user request limit — transient
+        transient = (
+            resp.status_code in (429, 500, 503)
+            or '"code":4' in last
+            or '"code":17' in last
+            or '"code":613' in last
+            or '"is_transient":true' in last
+        )
+        if transient and attempt < _retries:
+            import time
+            time.sleep(20 * (attempt + 1))  # 20s, 40s, 60s
+            continue
+        if transient:
+            raise RateLimited(
+                "Meta rate limit / batas panggilan API tercapai. "
+                "App masih Development mode — limit rendah. "
+                "Coba lagi ~1 jam, atau ajukan app ke mode Live. "
+                f"[{resp.status_code}] {last[:200]}"
+            )
+        raise RuntimeError(f"Graph {path} ({resp.status_code}): {last}")
+    raise RuntimeError(f"Graph {path}: gagal setelah {_retries} retry. {last}")
 
 
 def fetch_insights(level: str, *, date_preset: str | None = None,
@@ -526,6 +556,18 @@ def main() -> int:
     except ConfigError as e:
         print(f"[config] {e}", file=sys.stderr)
         return 2
+    except RateLimited as e:
+        warn = (
+            f"⏳ Laporan {mode} tertunda — {e}\n"
+            "Jadwal berikutnya akan mencoba lagi otomatis."
+        )
+        print(warn, file=sys.stderr)
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            try:
+                send_telegram(warn)
+            except Exception:  # noqa: BLE001
+                pass
+        return 0  # bukan kegagalan permanen — jangan tandai run merah
     except Exception as e:  # noqa: BLE001
         err = f"❌ Laporan iklan ({mode}) GAGAL {now_wib():%d %b %H:%M}\n{type(e).__name__}: {e}"
         print(err, file=sys.stderr)
