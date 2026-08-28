@@ -13,6 +13,11 @@ name = "lovamily-laporan-relay"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 
+# Penjadwal laporan (UTC). Dipakai menggantikan cron GitHub Actions yang
+# tidak andal untuk repo sepi. 00:00 UTC = 07:00 WIB.
+[triggers]
+crons = ["0 0 * * *", "30 0 * * 1"]
+
 [vars]
 GITHUB_REPO = "bedahdataid-cell/lovamily"
 ALLOWED_CHAT_ID = "-5432346051"

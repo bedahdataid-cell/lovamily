@@ -1,18 +1,19 @@
 name: Laporan Iklan Lovamily
 
 # Berjalan di cloud GitHub — TIDAK butuh PC menyala.
-# Jadwal cron GitHub dalam UTC. WIB = UTC+7.
-#   Harian  07:00 WIB  -> 00:00 UTC
-#   Mingguan 07:30 WIB Senin -> 00:30 UTC Senin
-# Catatan: cron GitHub bisa telat 5-15 menit saat beban tinggi (normal).
 #
-# repository_dispatch (event_type: laporan_iklan) dipicu Cloudflare Worker
-# saat ada perintah "/laporan [harian|mingguan]" di grup Telegram.
+# PENJADWALAN ADA DI CLOUDFLARE WORKER, bukan di sini.
+# Cron GitHub Actions terbukti tidak andal untuk repo yang jarang di-push
+# (jadwal di-skip diam-diam). Cloudflare Cron Triggers memicu
+# repository_dispatch di bawah pada jadwal:
+#   00:00 UTC harian        -> 07:00 WIB -> mode harian
+#   00:30 UTC Senin         -> 07:30 WIB -> mode mingguan
+# Lihat tools/laporan-iklan/cloudflare-worker/.
+#
+# repository_dispatch juga dipicu Worker saat ada perintah
+# "/laporan [harian|mingguan]" di grup Telegram (on-demand).
 
 on:
-  schedule:
-    - cron: "0 0 * * *"      # harian 07:00 WIB
-    - cron: "30 0 * * 1"     # mingguan Senin 07:30 WIB
   workflow_dispatch:          # tombol "Run workflow" manual di tab Actions
     inputs:
       mode:
@@ -54,12 +55,6 @@ jobs:
               m="${{ github.event.client_payload.mode }}"
               [ "$m" = "mingguan" ] || m="harian"
               echo "value=$m" >> "$GITHUB_OUTPUT" ;;
-            schedule)
-              if [ "${{ github.event.schedule }}" = "30 0 * * 1" ]; then
-                echo "value=mingguan" >> "$GITHUB_OUTPUT"
-              else
-                echo "value=harian" >> "$GITHUB_OUTPUT"
-              fi ;;
             *)
               echo "value=harian" >> "$GITHUB_OUTPUT" ;;
           esac

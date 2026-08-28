@@ -1,7 +1,12 @@
 # Relay on-demand: `/laporan` di grup Telegram → laporan langsung
 
-Melengkapi jadwal otomatis (07:00 harian / Senin 07:30). Dengan relay ini,
-siapa pun di grup **"Lovamily Laporan AI"** bisa minta laporan kapan saja:
+Worker ini punya **dua fungsi**:
+
+1. **Penjadwal** (Cloudflare Cron Triggers) — mengirim laporan harian 07:00 WIB
+   dan mingguan Senin 07:30 WIB. **Ini menggantikan cron GitHub Actions**, yang
+   terbukti tidak andal untuk repo yang jarang di-push (jadwal di-skip diam-diam).
+2. **Relay on-demand** (webhook Telegram) — siapa pun di grup **"Lovamily
+   Laporan AI"** bisa minta laporan kapan saja:
 
 ```
 /laporan            → laporan harian
@@ -56,6 +61,12 @@ Simpan — dipakai di Worker (`TELEGRAM_SECRET`) DAN saat set webhook.
 
    Deploy ulang setelah menambah variable.
 5. Catat URL Worker: `https://lovamily-laporan-relay.<akun>.workers.dev`
+6. **Aktifkan Cron Triggers** (penjadwal laporan): Worker → **Settings** →
+   **Triggers** → bagian **Cron Triggers** → **Add Cron Trigger** → tambah dua:
+   - `0 0 * * *`  (harian, 07:00 WIB)
+   - `30 0 * * 1` (mingguan, Senin 07:30 WIB)
+   Kalau deploy lewat Wrangler (Cara B), dua cron ini sudah ada di
+   `wrangler.toml` dan otomatis terpasang saat `wrangler deploy`.
 
 **Cara B — Wrangler CLI:**
 ```bash

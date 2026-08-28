@@ -1,37 +1,36 @@
 /**
- * Relay Telegram -> GitHub Actions untuk laporan iklan Lovamily on-demand.
+ * Relay + penjadwal untuk laporan iklan Lovamily.
  *
- * Alur:
- *   1. Telegram webhook POST tiap update ke Worker ini.
- *   2. Kalau text pesan diawali "/laporan" (opsional "harian"/"mingguan"),
- *      Worker balas "diproses..." ke grup lalu memicu GitHub
- *      repository_dispatch event "laporan_iklan".
- *   3. Workflow .github/workflows/laporan-iklan.yml (trigger repository_dispatch)
- *      menjalankan script -> laporan dikirim ke grup oleh script itu sendiri.
+ * DUA fungsi:
  *
- * Worker ini TIDAK menyimpan state apa pun. Ringan, ~1 request per perintah.
+ * A. On-demand (fetch handler) — Telegram webhook.
+ *    "/laporan [harian|mingguan]" di grup -> picu GitHub repository_dispatch.
  *
- * ENV (Settings -> Variables and Secrets di dashboard Worker):
- *   TELEGRAM_BOT_TOKEN   - token bot (@BotFather)
- *   TELEGRAM_SECRET      - string acak; dicek vs header webhook Telegram
- *   GITHUB_PAT           - fine-grained PAT, izin "Actions: write" utk repo lovamily
- *   GITHUB_REPO          - "bedahdataid-cell/lovamily"
- *   ALLOWED_CHAT_ID      - "-5432346051" (grup Lovamily Laporan AI). Kosong = semua chat.
+ * B. Terjadwal (scheduled handler) — Cloudflare Cron Triggers.
+ *    Dipakai karena cron GitHub Actions TIDAK ANDAL untuk repo yang sepi
+ *    (sering di-skip). Cloudflare cron presisi. Worker memicu
+ *    repository_dispatch yang sama; GitHub Actions tetap yang menjalankan
+ *    script Python & mengirim ke Telegram.
  *
- * Perintah yang dikenali di grup:
- *   /laporan            -> mode harian
- *   /laporan harian
- *   /laporan mingguan
- *   /laporan@lovamily_laporan_bot mingguan   (bentuk mention juga diterima)
+ *    Cron di wrangler.toml (UTC):
+ *      "0 0 * * *"   -> 07:00 WIB  -> mode "harian"
+ *      "30 0 * * 1"  -> Senin 07:30 WIB -> mode "mingguan"
+ *
+ * Worker tidak menyimpan state. ENV (dashboard: Settings -> Variables & Secrets):
+ *   TELEGRAM_BOT_TOKEN  - token bot (@BotFather)
+ *   TELEGRAM_SECRET     - string acak; dicek vs header webhook Telegram
+ *   GITHUB_PAT          - fine-grained PAT, izin Contents+Actions RW utk repo lovamily
+ *   GITHUB_REPO         - "bedahdataid-cell/lovamily"
+ *   ALLOWED_CHAT_ID     - "-5432346051" (grup). Kosong = semua chat.
  */
 
 export default {
+  // ---- A. On-demand: webhook Telegram ----
   async fetch(request, env) {
     if (request.method !== "POST") {
       return new Response("laporan-iklan relay: OK", { status: 200 });
     }
 
-    // Verifikasi request memang dari Telegram (secret token webhook).
     if (env.TELEGRAM_SECRET) {
       const got = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
       if (got !== env.TELEGRAM_SECRET) {
@@ -48,22 +47,21 @@ export default {
 
     const msg = update.message || update.channel_post;
     if (!msg || typeof msg.text !== "string") {
-      return json({ ok: true }); // update lain (join, edit, dst) diabaikan
+      return json({ ok: true });
     }
 
     const chatId = String(msg.chat.id);
     if (env.ALLOWED_CHAT_ID && chatId !== String(env.ALLOWED_CHAT_ID)) {
-      return json({ ok: true }); // chat lain diabaikan diam-diam
+      return json({ ok: true });
     }
 
     const text = msg.text.trim();
     const m = text.match(/^\/laporan(?:@\w+)?(?:\s+(harian|mingguan))?\b/i);
     if (!m) {
-      return json({ ok: true }); // bukan perintah kita
+      return json({ ok: true });
     }
     const mode = (m[1] || "harian").toLowerCase();
 
-    // Balas cepat supaya user tahu diterima.
     await tg(env, "sendMessage", {
       chat_id: chatId,
       text: `⏳ Menyiapkan laporan ${mode}… (biasanya < 1 menit)`,
@@ -71,8 +69,39 @@ export default {
       allow_sending_without_reply: true,
     });
 
-    // Picu GitHub Actions.
-    const ghResp = await fetch(
+    const r = await dispatchGithub(env, mode, { requested_by: msg.from && msg.from.id, chat_id: chatId });
+    if (!r.ok) {
+      await tg(env, "sendMessage", {
+        chat_id: chatId,
+        text: `❌ Gagal memicu laporan (GitHub ${r.status}). Cek PAT / repo.\n${r.detail.slice(0, 300)}`,
+      });
+    }
+    return json({ ok: true });
+  },
+
+  // ---- B. Terjadwal: Cloudflare Cron Triggers ----
+  async scheduled(event, env, ctx) {
+    // event.cron = string cron yang memicu, mis. "0 0 * * *"
+    const mode = event.cron === "30 0 * * 1" ? "mingguan" : "harian";
+    ctx.waitUntil(
+      (async () => {
+        const r = await dispatchGithub(env, mode, { source: "cloudflare-cron", cron: event.cron });
+        if (!r.ok && env.ALLOWED_CHAT_ID) {
+          await tg(env, "sendMessage", {
+            chat_id: env.ALLOWED_CHAT_ID,
+            text: `❌ Penjadwal laporan ${mode} gagal memicu GitHub (${r.status}).\n${r.detail.slice(0, 300)}`,
+          });
+        }
+      })()
+    );
+  },
+};
+
+// --- helper ---
+
+async function dispatchGithub(env, mode, extra) {
+  try {
+    const resp = await fetch(
       `https://api.github.com/repos/${env.GITHUB_REPO}/dispatches`,
       {
         method: "POST",
@@ -84,22 +113,16 @@ export default {
         },
         body: JSON.stringify({
           event_type: "laporan_iklan",
-          client_payload: { mode, requested_by: msg.from && msg.from.id, chat_id: chatId },
+          client_payload: { mode, ...extra },
         }),
       }
     );
-
-    if (!ghResp.ok) {
-      const detail = await ghResp.text();
-      await tg(env, "sendMessage", {
-        chat_id: chatId,
-        text: `❌ Gagal memicu laporan (GitHub ${ghResp.status}). Cek PAT / repo.\n${detail.slice(0, 300)}`,
-      });
-    }
-
-    return json({ ok: true });
-  },
-};
+    if (resp.ok) return { ok: true, status: resp.status, detail: "" };
+    return { ok: false, status: resp.status, detail: await resp.text() };
+  } catch (e) {
+    return { ok: false, status: 0, detail: String(e) };
+  }
+}
 
 function json(obj) {
   return new Response(JSON.stringify(obj), {
@@ -115,6 +138,6 @@ async function tg(env, method, body) {
       body: JSON.stringify(body),
     });
   } catch {
-    /* abaikan — balasan kenyamanan saja */
+    /* abaikan */
   }
 }
